@@ -9,6 +9,7 @@ import SpeakerView from './components/SpeakerView'
 import DistributionView from './components/DistributionView'
 import GapView from './components/GapView'
 import TransitionView from './components/TransitionView'
+import ReviewView from './components/ReviewView'
 import SearchBatchPanel from './components/SearchBatchPanel'
 import ImportDialog from './components/ImportDialog'
 import MigrationDialog from './components/MigrationDialog'
@@ -42,6 +43,10 @@ export default function App() {
   const [transStats, setTransStats] = useState(null)
   const [transLoading, setTransLoading] = useState(false)
   const [transError, setTransError] = useState(null)
+  // 标注抽样复核批次（null = 尚未加载；{batch: null} = 当前文档无批次）
+  const [reviewData, setReviewData] = useState(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [reviewError, setReviewError] = useState(null)
   const [gapMinLen, setGapMinLen] = useState(1) // 最小缺口长度筛选
   const [gapCursor, setGapCursor] = useState(-1) // 上一处/下一处导航位置
   const [pendingLocate, setPendingLocate] = useState(null)
@@ -224,6 +229,27 @@ export default function App() {
     loadTransitions()
   }, [loadTransitions])
 
+  // ---------- 标注抽样复核（批次内容随文档 / 标注变化刷新新鲜度） ----------
+
+  const loadReview = useCallback(async () => {
+    if (docId == null) return
+    setReviewLoading(true)
+    setReviewError(null)
+    try {
+      setReviewData(await api.getReview(docId))
+    } catch (e) {
+      setReviewData(null)
+      setReviewError(e.message || String(e))
+    } finally {
+      setReviewLoading(false)
+    }
+    // docData 变化（标注增删改 / 迁移）后重新读取批次的 stale 标记
+  }, [docId, docData])
+
+  useEffect(() => {
+    loadReview()
+  }, [loadReview])
+
   // 最小缺口长度筛选在前端进行，避免每次调整都重新请求
   const visibleGaps = useMemo(
     () => (gapStats?.gaps ?? []).filter((g) => g.length >= gapMinLen),
@@ -353,6 +379,63 @@ export default function App() {
     setPendingLocate({ docId, start: seg.start, end: seg.end })
   }
 
+  // ---------- 标注抽样复核 ----------
+
+  async function handleCreateReview(codeSettings) {
+    try {
+      setReviewData(await api.createReview(docId, codeSettings))
+      setReviewError(null)
+    } catch (e) {
+      showError(e)
+      throw e
+    }
+  }
+
+  async function handleRegenerateReview() {
+    const batch = reviewData?.batch
+    if (!batch) return
+    if (batch.counts.total > 0) {
+      const ok = window.confirm(
+        '重新生成抽样将按当前文档与标注抽取新的复核队列，并清空已有的通过 / 需修订结论，是否继续？'
+      )
+      if (!ok) return
+    }
+    try {
+      setReviewData(await api.createReview(docId, batch.codes.map((s) => ({
+        code_id: s.code_id,
+        sample_size: s.sample_size,
+      }))))
+      setReviewError(null)
+    } catch (e) {
+      showError(e)
+    }
+  }
+
+  async function handleDeleteReview() {
+    try {
+      await api.deleteReview(docId)
+      setReviewData({ batch: null })
+    } catch (e) {
+      showError(e)
+    }
+  }
+
+  async function handlePatchReview(itemId, status, note) {
+    try {
+      setReviewData(await api.updateReviewItem(docId, itemId, status, note))
+      setReviewError(null)
+    } catch (e) {
+      showError(e)
+      throw e
+    }
+  }
+
+  // 复核队列「定位正文」：切回正文并闪烁定位
+  function handleLocateReviewItem(item) {
+    setView('text')
+    setPendingLocate({ docId, start: item.start, end: item.end })
+  }
+
   // 分布对比单元格 → 切到目标文档正文并定位首个对应片段
   function handleLocateCell(documentId, seg) {
     setDocId(documentId)
@@ -439,6 +522,15 @@ export default function App() {
     if (filters === null) return docData.codings
     return docData.codings.filter((c) => filters.has(c.code_id))
   }, [docData, filters])
+
+  // 每种编码在当前文档的标注数（抽样设置表单使用，不受编码筛选影响）
+  const codingCounts = useMemo(() => {
+    const map = {}
+    for (const c of docData?.codings ?? []) {
+      map[c.code_id] = (map[c.code_id] ?? 0) + 1
+    }
+    return map
+  }, [docData])
 
   const sidebarCodings = useMemo(() => {
     if (!docData) return []
@@ -557,6 +649,14 @@ export default function App() {
             >
               编码流转
             </button>
+            <button
+              role="tab"
+              aria-selected={view === 'review'}
+              className={view === 'review' ? 'active' : ''}
+              onClick={() => setView('review')}
+            >
+              标注复核
+            </button>
           </div>
           {view === 'text' ? (
             <TextView
@@ -602,6 +702,20 @@ export default function App() {
               loading={transLoading}
               error={transError}
               onLocateInstance={handleLocateSegment}
+            />
+          ) : view === 'review' ? (
+            <ReviewView
+              key={`review-${docId}`}
+              batch={reviewData?.batch ?? null}
+              loading={reviewLoading}
+              error={reviewError}
+              codes={codebook}
+              codingCounts={codingCounts}
+              onCreate={handleCreateReview}
+              onRegenerate={handleRegenerateReview}
+              onDelete={handleDeleteReview}
+              onPatch={handlePatchReview}
+              onLocate={handleLocateReviewItem}
             />
           ) : (
             <DistributionView

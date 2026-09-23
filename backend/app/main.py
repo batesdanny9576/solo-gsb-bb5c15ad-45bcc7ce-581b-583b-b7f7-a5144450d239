@@ -29,6 +29,11 @@ from .importing import (
     parse_package,
 )
 from .migration import PENDING_STATUSES, build_migration_preview
+from .review_sampling import (
+    build_context,
+    codings_fingerprint,
+    stable_sample,
+)
 from .speakers import compute_speaker_stats
 from .transitions import compute_transitions
 
@@ -114,6 +119,26 @@ class MigrationCommitRequest(BaseModel):
     old_fingerprint: str = Field(min_length=1)
     new_content: str = Field(min_length=1)
     decisions: list[MigrationDecision] = Field(default_factory=list)
+
+
+class ReviewSampleCode(BaseModel):
+    """抽样设置中的单个编码：编码 id 与该编码的抽样数量。"""
+
+    code_id: int
+    sample_size: int = Field(ge=0)
+
+
+class ReviewBatchCreate(BaseModel):
+    """生成抽样批次：为当前文档选择编码并设置每种编码的抽样数量。"""
+
+    codes: list[ReviewSampleCode] = Field(min_length=1, max_length=200)
+
+
+class ReviewItemUpdate(BaseModel):
+    """单条复核结论：pending 待处理 / approved 通过 / revision 需修订。"""
+
+    status: Literal["pending", "approved", "revision"]
+    note: str = Field(default="", max_length=2000)
 
 
 # ---------- 应用 ----------
@@ -692,6 +717,281 @@ def migration_commit(document_id: int, body: MigrationCommitRequest) -> dict:
             },
             "codings": list_codings(conn, document_id),
         }
+
+
+# ---------- 标注抽样复核 ----------
+
+def serialize_review_batch(conn, document_id: int) -> dict | None:
+    """组装当前文档抽样批次（含逐条复核状态、原文上下文与新鲜度判断）。
+
+    抽样批次生成时锁定文档内容指纹与标注集合指纹；读取时实时比对：
+      - 文档内容变化（正文被编辑 / 迁移）→ stale.reasons 含 document_changed；
+      - 标注集合变化（新增 / 删除 / 改区间 / 改编码）→ 含 codings_changed。
+    批次过期后仍可读、可查看抽样时上下文，但不可继续提交复核结论，
+    需重新生成抽样。
+    """
+    batch_row = conn.execute(
+        "SELECT * FROM review_batches WHERE document_id = ?", (document_id,)
+    ).fetchone()
+    if batch_row is None:
+        return None
+    batch = dict(batch_row)
+
+    doc = get_document_or_404(conn, document_id)
+    current_doc_fp = content_fingerprint(doc["content"])
+    current_codings = list_codings(conn, document_id)
+    current_codings_fp = codings_fingerprint(current_codings)
+    coding_by_id = {c["id"]: c for c in current_codings}
+
+    reasons: list[str] = []
+    if current_doc_fp != batch["doc_fingerprint"]:
+        reasons.append("document_changed")
+    if current_codings_fp != batch["codings_fingerprint"]:
+        reasons.append("codings_changed")
+
+    code_rows = {
+        r["id"]: dict(r)
+        for r in conn.execute("SELECT id, name, color FROM codes ORDER BY id")
+    }
+
+    sample_codes = [
+        {
+            "code_id": r["code_id"],
+            "code_name": code_rows.get(r["code_id"], {}).get("name"),
+            "color": code_rows.get(r["code_id"], {}).get("color"),
+            "sample_size": r["sample_size"],
+            "available_count": r["available_count"],
+        }
+        for r in conn.execute(
+            "SELECT code_id, sample_size, available_count FROM review_batch_codes"
+            " WHERE batch_id = ? ORDER BY id",
+            (batch["id"],),
+        ).fetchall()
+    ]
+
+    items: list[dict] = []
+    counts = {"pending": 0, "approved": 0, "revision": 0}
+    rows = conn.execute(
+        """
+        SELECT ri.id, ri.coding_id, ri.code_id, ri.start, ri."end",
+               ri.status, ri.note, ri.reviewed_at, ri.sort_order
+        FROM review_items ri
+        WHERE ri.batch_id = ?
+        ORDER BY ri.sort_order, ri.id
+        """,
+        (batch["id"],),
+    ).fetchall()
+    for row in rows:
+        r = dict(row)
+        coding = (
+            coding_by_id.get(r["coding_id"]) if r["coding_id"] is not None else None
+        )
+        # 标注仍存在即展示实时原文（文档未过期时与抽样时一致）；
+        # 标注已删除或批次过期时退化为抽样时保存的区间文本
+        if coding is not None and current_doc_fp == batch["doc_fingerprint"]:
+            ctx = build_context(doc["content"], coding["start"], coding["end"])
+            missing = False
+            changed = False
+            start, end = coding["start"], coding["end"]
+            code_id = coding["code_id"]
+        else:
+            start, end = r["start"], r["end"]
+            code_id = r["code_id"]
+            within = 0 <= start < end <= len(doc["content"])
+            ctx = (
+                build_context(doc["content"], start, end)
+                if within
+                else {"text": None, "before": None, "after": None}
+            )
+            missing = coding is None
+            changed = coding is not None and (
+                coding["start"] != r["start"]
+                or coding["end"] != r["end"]
+                or coding["code_id"] != r["code_id"]
+            )
+        code = code_rows.get(code_id)
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+        items.append(
+            {
+                "id": r["id"],
+                "coding_id": r["coding_id"],
+                "code_id": code_id,
+                "code_name": code["name"] if code else None,
+                "color": code["color"] if code else None,
+                "start": start,
+                "end": end,
+                "text": ctx["text"],
+                "context_before": ctx["before"],
+                "context_after": ctx["after"],
+                "status": r["status"],
+                "note": r["note"],
+                "reviewed_at": r["reviewed_at"],
+                "missing": missing,
+                "changed": changed,
+            }
+        )
+
+    return {
+        "id": batch["id"],
+        "document_id": document_id,
+        "created_at": batch["created_at"],
+        "doc_fingerprint": batch["doc_fingerprint"],
+        "codings_fingerprint": batch["codings_fingerprint"],
+        "stale": bool(reasons),
+        "stale_reasons": reasons,
+        "codes": sample_codes,
+        "items": items,
+        "counts": {
+            "total": len(items),
+            "pending": counts["pending"],
+            "approved": counts["approved"],
+            "revision": counts["revision"],
+        },
+    }
+
+
+@app.get("/api/documents/{document_id}/review")
+def get_review_batch(document_id: int) -> dict:
+    """获取当前文档的标注抽样复核批次；尚未生成时返回 batch: null。"""
+    with get_db() as conn:
+        get_document_or_404(conn, document_id)
+        return {"batch": serialize_review_batch(conn, document_id)}
+
+
+@app.post("/api/documents/{document_id}/review", status_code=201)
+def create_review_batch(document_id: int, body: ReviewBatchCreate) -> dict:
+    """按文档指纹与标注 id 稳定抽取待复核标注，替换旧批次。
+
+    请求体为每种参与编码的抽样数量；同一文档 + 同一批标注反复生成得到
+    完全相同的抽样结果。抽样数量超过该编码可用标注数时抽取全部；编码
+    不存在或该编码在当前文档没有标注返回 422。重新生成会清空此前的
+    复核结论。
+    """
+    with get_db() as conn:
+        doc = get_document_or_404(conn, document_id)
+        code_rows = {
+            r["id"]: dict(r)
+            for r in conn.execute("SELECT id, name, color FROM codes ORDER BY id")
+        }
+        # 请求中同一编码重复出现视为非法，避免抽样数量歧义
+        wanted: dict[int, int] = {}
+        for item in body.codes:
+            if item.code_id in wanted:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"编码 {item.code_id} 在抽样设置中重复出现",
+                )
+            wanted[item.code_id] = item.sample_size
+        unknown = [cid for cid in wanted if cid not in code_rows]
+        if unknown:
+            raise HTTPException(status_code=404, detail=f"编码不存在: {sorted(unknown)}")
+
+        codings = list_codings(conn, document_id)
+        ids_by_code: dict[int, list[int]] = {}
+        for c in codings:
+            ids_by_code.setdefault(c["code_id"], []).append(c["id"])
+        empty_codes = [cid for cid, n in wanted.items() if n > 0 and cid not in ids_by_code]
+        if empty_codes:
+            names = [code_rows[cid]["name"] for cid in empty_codes]
+            raise HTTPException(
+                status_code=422,
+                detail=f"以下编码在当前文档没有标注，无法抽样：{', '.join(names)}",
+            )
+
+        doc_fp = content_fingerprint(doc["content"])
+        cod_fp = codings_fingerprint(codings)
+
+        # 每篇文档至多保留一个批次：替换旧批次（级联清空空旧明细）
+        conn.execute("DELETE FROM review_batches WHERE document_id = ?", (document_id,))
+        cur = conn.execute(
+            "INSERT INTO review_batches (document_id, doc_fingerprint, codings_fingerprint)"
+            " VALUES (?, ?, ?)",
+            (document_id, doc_fp, cod_fp),
+        )
+        batch_id = cur.lastrowid
+
+        # 全局稳定顺序：先按编码 id、再按该编码内的稳定散列顺序
+        ordered: list[tuple[int, int]] = []
+        for code_id in sorted(wanted):
+            sample_size = wanted[code_id]
+            picked = stable_sample(doc_fp, code_id, ids_by_code.get(code_id, []), sample_size)
+            ordered.extend((code_id, cid) for cid in picked)
+            conn.execute(
+                "INSERT INTO review_batch_codes"
+                " (batch_id, code_id, sample_size, available_count) VALUES (?, ?, ?, ?)",
+                (batch_id, code_id, sample_size, len(ids_by_code.get(code_id, []))),
+            )
+        coding_by_id = {c["id"]: c for c in codings}
+        for sort_order, (code_id, coding_id) in enumerate(ordered):
+            c = coding_by_id[coding_id]
+            conn.execute(
+                'INSERT INTO review_items (batch_id, coding_id, code_id, sort_order,'
+                ' start, "end") VALUES (?, ?, ?, ?, ?, ?)',
+                (batch_id, coding_id, code_id, sort_order, c["start"], c["end"]),
+            )
+        return {"batch": serialize_review_batch(conn, document_id)}
+
+
+@app.patch("/api/documents/{document_id}/review/items/{item_id}")
+def update_review_item(
+    document_id: int, item_id: int, body: ReviewItemUpdate
+) -> dict:
+    """标记单条复核结论（通过 / 需修订 / 重置待处理）并保存备注。
+
+    批次已过期（文档或标注变化）时拒绝写入（409），需重新生成抽样；
+    待处理状态清空 reviewed_at，其余状态记录处理时间。
+    """
+    with get_db() as conn:
+        get_document_or_404(conn, document_id)
+        item_row = conn.execute(
+            """
+            SELECT ri.id FROM review_items ri
+            JOIN review_batches rb ON rb.id = ri.batch_id
+            WHERE ri.id = ? AND rb.document_id = ?
+            """,
+            (item_id, document_id),
+        ).fetchone()
+        if item_row is None:
+            raise HTTPException(status_code=404, detail="复核条目不存在")
+
+        batch_row = conn.execute(
+            "SELECT doc_fingerprint, codings_fingerprint FROM review_batches"
+            " WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        doc = get_document_or_404(conn, document_id)
+        stale = content_fingerprint(doc["content"]) != batch_row["doc_fingerprint"] or (
+            codings_fingerprint(list_codings(conn, document_id))
+            != batch_row["codings_fingerprint"]
+        )
+        if stale:
+            raise HTTPException(
+                status_code=409,
+                detail="文档或标注已变化，本抽样批次已过期，请重新生成抽样后再复核",
+            )
+
+        if body.status == "pending":
+            conn.execute(
+                "UPDATE review_items SET status = 'pending', note = ?, reviewed_at = NULL"
+                " WHERE id = ?",
+                (body.note, item_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE review_items SET status = ?, note = ?,"
+                " reviewed_at = datetime('now') WHERE id = ?",
+                (body.status, body.note, item_id),
+            )
+        return {"batch": serialize_review_batch(conn, document_id)}
+
+
+@app.delete("/api/documents/{document_id}/review", status_code=204)
+def delete_review_batch(document_id: int) -> Response:
+    """丢弃当前文档的抽样批次（含全部复核结论）。"""
+    with get_db() as conn:
+        get_document_or_404(conn, document_id)
+        conn.execute("DELETE FROM review_batches WHERE document_id = ?", (document_id,))
+    return Response(status_code=204)
 
 
 @app.put("/api/codings/{coding_id}")

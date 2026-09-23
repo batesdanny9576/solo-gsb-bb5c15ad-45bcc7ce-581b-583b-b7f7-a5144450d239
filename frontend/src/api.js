@@ -85,6 +85,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  // 标注抽样复核：获取批次（无批次返回 {batch: null}）/ 生成（替换旧批次）/ 删除
+  getReview: (id) => request(`/documents/${id}/review`),
+  createReview: (id, codes) =>
+    request(`/documents/${id}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ codes }),
+    }),
+  deleteReview: (id) =>
+    request(`/documents/${id}/review`, { method: 'DELETE' }),
+  // 标记单条复核结论：status = pending | approved | revision
+  updateReviewItem: (docId, itemId, status, note) =>
+    request(`/documents/${docId}/review/items/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, note }),
+    }),
   updateCoding: (id, payload) =>
     request(`/codings/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteCoding: (id) => request(`/codings/${id}`, { method: 'DELETE' }),

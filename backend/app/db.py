@@ -37,6 +37,41 @@ CREATE TABLE IF NOT EXISTS codings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_codings_doc ON codings(document_id);
+
+-- 标注抽样复核（每篇文档至多保留一个抽样批次；重新生成即替换）
+CREATE TABLE IF NOT EXISTS review_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+    doc_fingerprint TEXT NOT NULL,
+    codings_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS review_batch_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES review_batches(id) ON DELETE CASCADE,
+    code_id INTEGER NOT NULL REFERENCES codes(id) ON DELETE CASCADE,
+    sample_size INTEGER NOT NULL CHECK (sample_size >= 0),
+    available_count INTEGER NOT NULL CHECK (available_count >= 0),
+    UNIQUE (batch_id, code_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES review_batches(id) ON DELETE CASCADE,
+    coding_id INTEGER REFERENCES codings(id) ON DELETE SET NULL,
+    code_id INTEGER NOT NULL REFERENCES codes(id) ON DELETE CASCADE,
+    sort_order INTEGER NOT NULL,
+    start INTEGER NOT NULL CHECK (start >= 0),
+    "end" INTEGER NOT NULL CHECK ("end" > start),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'revision')),
+    note TEXT NOT NULL DEFAULT '',
+    reviewed_at TEXT,
+    UNIQUE (batch_id, sort_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_items_batch ON review_items(batch_id);
 """
 
 PALETTE = [

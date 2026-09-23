@@ -888,6 +888,296 @@ textarea:focus {
   gap: 6px;
 }
 
+/* ---------- 标注抽样复核视图 ---------- */
+
+.rv-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rv-setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rv-setup-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #f8fafc;
+}
+
+.rv-setup-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.rv-size {
+  color: var(--muted);
+  font-size: 13px;
+  gap: 6px;
+}
+
+.rv-size input {
+  width: 80px;
+}
+
+.rv-setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rv-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rv-counts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rv-count {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.rv-count.rv-pending {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.rv-count.rv-approved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.rv-count.rv-revision {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.rv-total {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.rv-head-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.rv-stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.rv-stale-banner .link-btn {
+  padding: 0 4px;
+}
+
+.rv-filter-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rv-filter-bar button {
+  font-size: 13px;
+  padding: 4px 12px;
+  border-radius: 14px;
+}
+
+.rv-filter-bar button.rv-filter-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.rv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rv-list > li {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.rv-item {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: #fcfcfd;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rv-item.rv-approved {
+  border-left-color: #22c55e;
+}
+
+.rv-item.rv-revision {
+  border-left-color: #f59e0b;
+}
+
+.rv-item.rv-pending {
+  border-left-color: #cbd5e1;
+}
+
+.rv-item.rv-changed {
+  background: #fffbeb;
+}
+
+.rv-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.rv-item-head code {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rv-status-tag {
+  font-size: 12px;
+  padding: 1px 10px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.rv-status-tag.rv-pending {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.rv-status-tag.rv-approved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.rv-status-tag.rv-revision {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.rv-flag {
+  font-size: 11.5px;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 8px;
+  padding: 0 8px;
+}
+
+.rv-flag-bad {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.rv-text {
+  font-size: 13.5px;
+  line-height: 1.8;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.rv-text .rv-ctx {
+  color: var(--muted);
+}
+
+.rv-text mark {
+  background: #fde68a;
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+.rv-text.rv-missing {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.rv-note {
+  width: 100%;
+  resize: vertical;
+  font-size: 13px;
+}
+
+.rv-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rv-actions button {
+  font-size: 13px;
+  padding: 4px 14px;
+}
+
+.rv-actions .rv-btn-active.rv-ok {
+  background: #dcfce7;
+  border-color: #22c55e;
+  color: #166534;
+}
+
+.rv-actions .rv-btn-active.rv-bad {
+  background: #fef3c7;
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.rv-locate-side {
+  flex: none;
+  align-self: center;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
 /* ---------- 右栏 ---------- */
 
 .right-panel {
