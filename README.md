@@ -69,6 +69,13 @@ docker compose up --build
   - 前端支持**最小次数**与**最大间距**筛选（本地过滤，不重新请求）；展开条目查看每次转移的来源 / 目标**原文上下文**，点击实例自动切回正文、滚动并**闪烁定位来源起点到目标终点的整个跨度**；
   - 编码筛选或标注变化后转移列表同步刷新；**零标注**（无状态区间）与**无转移**（仅一段状态区间）时给出明确空状态。
   - 对应 `GET /api/documents/{id}/transitions?codes=1,2`（`codes` 为逗号分隔，缺省统计全部编码）。
+- **标注抽样复核**：正文区顶部切换到「标注复核」标签，为当前文档的每种编码设置**抽样数量**（0 表示不抽该编码）后生成复核计划——
+  - **稳定抽样**：每条标注的抽签分数为 `sha256(文档内容指纹 | 编码 id | 标注 id)`，每种编码独立取分数最小的前 N 条；同一快照下重复生成结果完全相同，**刷新页面、重启服务抽样结果均不变**；
+  - **复核队列**：逐条查看标注原文与前后文（各 30 字），标记**通过 / 需修订**并填写备注（失焦自动保存），也可重置为待处理；顶部按 **全部 / 待处理 / 通过 / 需修订** 筛选并显示数量，标签页标题带待处理角标；
+  - **定位正文**：点击「定位正文」切回正文视图并闪烁定位标注区间；标注在生成后被删除 / 改区间 / 改挂编码时，条目保留快照上下文并给出明确警示；
+  - **过期与重新生成**：文档正文（内容指纹变化）或标注集合（新增 / 删除 / 编辑 / 迁移）变化后，队列标记为**过期**并提示重新生成；重新生成覆盖旧队列，**仍被抽中的标注会继承此前的复核结论与备注**；
+  - 复核记录全部持久化（`review_plans` / `review_plan_codes` / `review_items` 三张表，随文档 / 编码级联）。
+  - 对应 `GET /api/documents/{id}/review`、`PUT /api/documents/{id}/review`、`PATCH /api/documents/{id}/review/items/{itemId}`。
 - **JSON 导出**：顶栏「导出 JSON」下载当前文档的完整编码结果（含每条标注的区间、原文切片与文档内容指纹 `fingerprint`），对应 `GET /api/documents/{id}/export`。
 - **标注包导入**：顶栏「导入标注包」可**粘贴**导出 JSON 文本或**选择 `.json` 文件**，把另一份（或此前导出的）编码结果导入**当前文档**——
   - **编码按名称映射**：以编码**名称**对齐当前编码本（忽略导出文件中的编码 id，避免不同库 id 错位）；当前编码本中没有同名编码的条目标记为**未知编码**，需先在编码本新建同名编码再导入；
@@ -113,6 +120,9 @@ npm run dev   # http://localhost:5173
 | GET | `/api/code-distribution` | 跨文档编码分布对比：全部文档按所选编码汇总标注字符数、段数与占文档长度比例（文档按标题稳定排序，含行内差异百分比与首个片段），单一快照返回缺失编码与空文档提示；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/gaps` | 覆盖缺口：合并所选编码重叠/相邻的标注区间后求全文补集，返回未覆盖区间的起止位置、长度与原文摘录（保留文首/文尾/零标注场景）及覆盖率；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
 | GET | `/api/documents/{id}/transitions` | 编码流转：全部标注边界切成原子区间并以覆盖编码集合表示状态，跳过无编码区间、合并相邻同状态区间后统计相邻状态的有向转移，返回每次转移的来源、目标区间、中间距离与原文摘录；`?codes=1,2` 按编码筛选（逗号分隔，缺省为全部编码） |
+| GET | `/api/documents/{id}/review` | 标注抽样复核队列：返回当前文档的抽样计划（内容指纹、标注集合指纹、生成时间）、各编码抽样配置、待处理/通过/需修订计数与逐条明细（快照区间、前后文、标注是否已删除/改区间/改挂编码）；未生成计划时 `plan` 为 null，文档或标注变化后 `stale=true` |
+| PUT | `/api/documents/{id}/review` | 生成或重新生成抽样计划，请求体 `{samples:[{code_id, sample_size}…]}`；按 `sha256(文档指纹|编码id|标注id)` 稳定抽取，覆盖旧计划并继承仍被抽中标注的旧复核结论；编码重复 / 所选编码无标注 / 文档无标注返回 422 |
+| PATCH | `/api/documents/{id}/review/items/{itemId}` | 更新单条复核结论与备注，请求体 `{verdict?: pending\|approved\|revision, note?: string}`；verdict 缺省只改备注，重置为 pending 时清空复核时间，返回最新队列（含 stale 标记） |
 | GET | `/api/documents/{id}/export` | 导出 JSON（附件下载，含 sha256 内容指纹） |
 | POST | `/api/documents/{id}/import/preview` | 标注包导入预检（不落库）：请求体 `{package: <导出 JSON>}`；按编码名称映射编码本，校验内容指纹 / 区间边界 / 原文切片 / 重复项，返回新增、跳过、未知编码、非法条目明细与新增项冲突明细 |
 | POST | `/api/documents/{id}/import` | 确认导入：单事务重跑全部校验，任一失败整批回滚（422，不落库）；仅写入新增标注（keep 共存），完全相同项跳过，返回新增 / 跳过明细与最新标注列表 |
@@ -142,11 +152,12 @@ npm run dev   # http://localhost:5173
 │       ├── transitions.py    # 编码流转（状态区间切分与有向转移统计）纯函数
 │       ├── importing.py      # 标注包导入：指纹 / 映射 / 校验 / 分类（预览计划）纯函数
 │       ├── migration.py      # 文档版本迁移：文本差异对齐 / 区间映射分类（保留·待确认·失配）纯函数
+│       ├── review.py         # 标注抽样复核：文档指纹 + 标注 id 稳定抽样 / 上下文纯函数
 │       └── db.py             # SQLite 连接、建表、示例数据
 └── frontend/
     ├── Dockerfile          # 多阶段构建：Vite build → nginx
     ├── nginx.conf          # 静态托管 + /api 反向代理
     └── src/
         ├── App.jsx         # 状态编排与冲突决策流
-        └── components/     # TextView / CodingForm / SearchBatchPanel / ImportDialog / MigrationDialog / ConflictDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView
+        └── components/     # TextView / CodingForm / SearchBatchPanel / ImportDialog / MigrationDialog / ConflictDialog / Sidebar / CooccurrenceView / SpeakerView / DistributionView / GapView / TransitionView / ReviewView
 ```

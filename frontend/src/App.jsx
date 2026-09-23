@@ -9,6 +9,7 @@ import SpeakerView from './components/SpeakerView'
 import DistributionView from './components/DistributionView'
 import GapView from './components/GapView'
 import TransitionView from './components/TransitionView'
+import ReviewView from './components/ReviewView'
 import SearchBatchPanel from './components/SearchBatchPanel'
 import ImportDialog from './components/ImportDialog'
 import MigrationDialog from './components/MigrationDialog'
@@ -26,7 +27,7 @@ export default function App() {
   const [error, setError] = useState(null)
   const [showNewDoc, setShowNewDoc] = useState(false)
   const [newDoc, setNewDoc] = useState({ title: '', content: '' })
-  const [view, setView] = useState('text') // text | cooccurrence | speakers | distribution | gaps | transitions
+  const [view, setView] = useState('text') // text | cooccurrence | speakers | distribution | gaps | transitions | review
   const [coocStats, setCoocStats] = useState(null)
   const [coocLoading, setCoocLoading] = useState(false)
   const [coocError, setCoocError] = useState(null)
@@ -47,6 +48,9 @@ export default function App() {
   const [pendingLocate, setPendingLocate] = useState(null)
   const [showImport, setShowImport] = useState(false)
   const [showMigration, setShowMigration] = useState(false)
+  const [reviewData, setReviewData] = useState(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [reviewError, setReviewError] = useState(null)
 
   const showError = useCallback((e) => {
     setError(e.message || String(e))
@@ -92,6 +96,7 @@ export default function App() {
       // 跨文档定位的待定位片段指向新文档本身，需保留；其余情况清除
       setPendingLocate((cur) => (cur && cur.docId === docId ? cur : null))
       loadDocument(docId)
+      setReviewData(null)
     }
   }, [docId, loadDocument])
 
@@ -223,6 +228,46 @@ export default function App() {
   useEffect(() => {
     loadTransitions()
   }, [loadTransitions])
+
+  // ---------- 标注抽样复核（随当前文档；标注变化后 stale 由后端检测） ----------
+
+  const loadReview = useCallback(async () => {
+    if (docId == null) return
+    setReviewLoading(true)
+    setReviewError(null)
+    try {
+      setReviewData(await api.getReview(docId))
+    } catch (e) {
+      setReviewData(null)
+      setReviewError(e.message || String(e))
+    } finally {
+      setReviewLoading(false)
+    }
+  }, [docId])
+
+  // 文档快照变化（新建 / 编辑 / 删除标注、迁移、导入）后重新拉取，以暴露 stale
+  useEffect(() => {
+    loadReview()
+  }, [loadReview, docData])
+
+  async function handleCreateReviewPlan(samples) {
+    setReviewData(await api.createReviewPlan(docId, samples))
+    setReviewError(null)
+  }
+
+  async function handleUpdateReviewItem(itemId, payload) {
+    try {
+      setReviewData(await api.updateReviewItem(docId, itemId, payload))
+      setReviewError(null)
+    } catch (e) {
+      showError(e)
+    }
+  }
+
+  function handleReviewLocate(item) {
+    setView('text')
+    setPendingLocate({ docId, start: item.start, end: item.end })
+  }
 
   // 最小缺口长度筛选在前端进行，避免每次调整都重新请求
   const visibleGaps = useMemo(
@@ -557,6 +602,17 @@ export default function App() {
             >
               编码流转
             </button>
+            <button
+              role="tab"
+              aria-selected={view === 'review'}
+              className={view === 'review' ? 'active' : ''}
+              onClick={() => setView('review')}
+            >
+              标注复核
+              {reviewData?.plan && reviewData.counts.pending > 0 && (
+                <span className="rv-tab-dot">{reviewData.counts.pending}</span>
+              )}
+            </button>
           </div>
           {view === 'text' ? (
             <TextView
@@ -602,6 +658,17 @@ export default function App() {
               loading={transLoading}
               error={transError}
               onLocateInstance={handleLocateSegment}
+            />
+          ) : view === 'review' ? (
+            <ReviewView
+              docId={docId}
+              codebook={codebook}
+              review={reviewData}
+              loading={reviewLoading}
+              error={reviewError}
+              onCreatePlan={handleCreateReviewPlan}
+              onUpdateItem={handleUpdateReviewItem}
+              onLocate={handleReviewLocate}
             />
           ) : (
             <DistributionView

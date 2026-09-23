@@ -29,6 +29,7 @@ from .importing import (
     parse_package,
 )
 from .migration import PENDING_STATUSES, build_migration_preview
+from .review import build_context, annotations_signature, select_sample_codings
 from .speakers import compute_speaker_stats
 from .transitions import compute_transitions
 
@@ -114,6 +115,26 @@ class MigrationCommitRequest(BaseModel):
     old_fingerprint: str = Field(min_length=1)
     new_content: str = Field(min_length=1)
     decisions: list[MigrationDecision] = Field(default_factory=list)
+
+
+class ReviewCodeSample(BaseModel):
+    """抽样计划中单个编码的抽样数量。"""
+
+    code_id: int
+    sample_size: int = Field(ge=1, le=100000)
+
+
+class ReviewPlanCreate(BaseModel):
+    """生成（或重新生成）当前文档的标注抽样复核计划。"""
+
+    samples: list[ReviewCodeSample] = Field(min_length=1, max_length=500)
+
+
+class ReviewVerdictUpdate(BaseModel):
+    """单条复核结果：verdict 缺省表示只更新备注。"""
+
+    verdict: Literal["pending", "approved", "revision"] | None = None
+    note: str | None = Field(default=None, max_length=2000)
 
 
 # ---------- 应用 ----------
@@ -1079,3 +1100,247 @@ def code_distribution(codes: str | None = Query(default=None)) -> dict:
         "missing_codes": missing_codes,
         "empty_documents": empty_documents,
     }
+
+
+# ---------- 标注抽样复核 ----------
+
+
+def _review_plan_row(conn, document_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM review_plans WHERE document_id = ?", (document_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _build_review_payload(conn, document_id: int, doc: dict) -> dict:
+    """组装当前文档抽样复核队列（计划、配置、逐项明细与计数）。"""
+    plan = _review_plan_row(conn, document_id)
+    if plan is None:
+        return {"document_id": document_id, "plan": None}
+
+    fingerprint_now = content_fingerprint(doc["content"])
+    signature_now = annotations_signature(list_codings(conn, document_id))
+    # 文档正文或标注集合自生成后发生变化：旧队列仅供查看，需重新生成
+    stale = (
+        plan["fingerprint"] != fingerprint_now
+        or plan["coding_signature"] != signature_now
+    )
+
+    config_rows = conn.execute(
+        """
+        SELECT pc.code_id, pc.sample_size, c.name AS code_name, c.color AS code_color,
+               (SELECT COUNT(*) FROM codings cg
+                WHERE cg.document_id = ? AND cg.code_id = pc.code_id) AS population
+        FROM review_plan_codes pc
+        LEFT JOIN codes c ON c.id = pc.code_id
+        WHERE pc.plan_id = ?
+        ORDER BY pc.code_id
+        """,
+        (document_id, plan["id"]),
+    ).fetchall()
+
+    content = doc["content"]
+    item_rows = conn.execute(
+        """
+        SELECT ri.id, ri.coding_id, ri.code_id, ri.verdict, ri.note,
+               ri.reviewed_at, ri.snap_start, ri.snap_end,
+               cg.start AS cur_start, cg."end" AS cur_end,
+               cg.code_id AS cur_code_id,
+               c.name AS code_name, c.color AS code_color
+        FROM review_items ri
+        LEFT JOIN codings cg ON cg.id = ri.coding_id
+        LEFT JOIN codes c ON c.id = COALESCE(cg.code_id, ri.code_id)
+        WHERE ri.plan_id = ?
+        ORDER BY ri.snap_start, ri.snap_end, ri.id
+        """,
+        (plan["id"],),
+    ).fetchall()
+
+    items: list[dict] = []
+    counts = {"pending": 0, "approved": 0, "revision": 0}
+    for r in item_rows:
+        r = dict(r)
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        start, end = r["snap_start"], r["snap_end"]
+        items.append(
+            {
+                "id": r["id"],
+                "coding_id": r["coding_id"],
+                "code_id": r["code_id"],
+                "code_name": r["code_name"],
+                "code_color": r["code_color"],
+                "verdict": r["verdict"],
+                "note": r["note"],
+                "reviewed_at": r["reviewed_at"],
+                "start": start,
+                "end": end,
+                "context": build_context(content, start, end),
+                # 标注仍存在且区间未变时可直接定位正文，否则标记差异原因
+                "missing": r["coding_id"] is None,
+                "range_changed": (
+                    r["coding_id"] is not None
+                    and (r["cur_start"], r["cur_end"]) != (start, end)
+                ),
+                "code_changed": (
+                    r["coding_id"] is not None and r["cur_code_id"] != r["code_id"]
+                ),
+            }
+        )
+
+    return {
+        "document_id": document_id,
+        "stale": stale,
+        "plan": {
+            "id": plan["id"],
+            "fingerprint": plan["fingerprint"],
+            "coding_signature": plan["coding_signature"],
+            "created_at": plan["created_at"],
+        },
+        "config": [
+            {
+                "code_id": r["code_id"],
+                "code_name": r["code_name"],
+                "code_color": r["code_color"],
+                "sample_size": r["sample_size"],
+                "population": r["population"],
+            }
+            for r in config_rows
+        ],
+        "counts": counts,
+        "items": items,
+    }
+
+
+@app.get("/api/documents/{document_id}/review")
+def get_review(document_id: int) -> dict:
+    """获取当前文档的标注抽样复核计划与复核队列。
+
+    尚未生成计划时返回 {"plan": null}；文档内容指纹或标注集合快照与生成时
+    不一致时 stale=true，提示复核者重新生成抽样（旧结果仍可查看）。
+    """
+    with get_db() as conn:
+        doc = get_document_or_404(conn, document_id)
+        return _build_review_payload(conn, document_id, doc)
+
+
+@app.put("/api/documents/{document_id}/review")
+def create_review_plan(document_id: int, body: ReviewPlanCreate) -> dict:
+    """生成（或重新生成）当前文档的标注抽样复核计划。
+
+    按请求中每种编码的抽样数量，以「文档内容指纹 + 编码 id + 标注 id」
+    稳定抽签；同一快照下重复生成结果完全相同，文档 / 标注变化后重新生成
+    样本随之更新。重新生成时覆盖旧计划；新样本中仍存在的同标注若此前已
+    复核，则保留其结论与备注（按 plan × coding 继承）。
+    """
+    with get_db() as conn:
+        doc = get_document_or_404(conn, document_id)
+        seen: set[int] = set()
+        samples: list[tuple[int, int]] = []
+        for item in body.samples:
+            if item.code_id in seen:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"编码 {item.code_id} 在抽样配置中重复出现",
+                )
+            seen.add(item.code_id)
+            get_code_or_404(conn, item.code_id)
+            samples.append((item.code_id, item.sample_size))
+
+        codings = list_codings(conn, document_id)
+        if not codings:
+            raise HTTPException(status_code=422, detail="当前文档还没有任何标注，无法抽样")
+
+        # 继承旧计划中对同一标注的复核结论（重新生成后仍被抽中时保留）
+        old_by_coding: dict[int, dict] = {}
+        old = _review_plan_row(conn, document_id)
+        if old is not None:
+            for r in conn.execute(
+                "SELECT coding_id, verdict, note FROM review_items"
+                " WHERE plan_id = ? AND coding_id IS NOT NULL",
+                (old["id"],),
+            ).fetchall():
+                old_by_coding[r["coding_id"]] = dict(r)
+
+        fingerprint = content_fingerprint(doc["content"])
+        picked = select_sample_codings(fingerprint, codings, samples)
+        if not picked:
+            raise HTTPException(
+                status_code=422,
+                detail="所选编码在当前文档中没有任何标注，抽样为空",
+            )
+
+        conn.execute(
+            "INSERT INTO review_plans (document_id, fingerprint, coding_signature)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(document_id) DO UPDATE SET"
+            " fingerprint = excluded.fingerprint,"
+            " coding_signature = excluded.coding_signature,"
+            " created_at = datetime('now')",
+            (document_id, fingerprint, annotations_signature(codings)),
+        )
+        plan_id = conn.execute(
+            "SELECT id FROM review_plans WHERE document_id = ?", (document_id,)
+        ).fetchone()["id"]
+        # 覆盖式重建：先清掉旧配置与旧条目（级联），再写入新计划内容
+        conn.execute("DELETE FROM review_plan_codes WHERE plan_id = ?", (plan_id,))
+        conn.execute("DELETE FROM review_items WHERE plan_id = ?", (plan_id,))
+        conn.executemany(
+            "INSERT INTO review_plan_codes (plan_id, code_id, sample_size)"
+            " VALUES (?, ?, ?)",
+            [(plan_id, code_id, size) for code_id, size in samples],
+        )
+        for c in picked:
+            prev = old_by_coding.get(c["id"])
+            conn.execute(
+                "INSERT INTO review_items"
+                " (plan_id, coding_id, code_id, verdict, note, reviewed_at,"
+                "  snap_start, snap_end)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    plan_id,
+                    c["id"],
+                    c["code_id"],
+                    prev["verdict"] if prev else "pending",
+                    prev["note"] if prev else "",
+                    prev["reviewed_at"] if prev else None,
+                    c["start"],
+                    c["end"],
+                ),
+            )
+        return _build_review_payload(conn, document_id, doc)
+
+
+@app.patch("/api/documents/{document_id}/review/items/{item_id}")
+def update_review_item(
+    document_id: int, item_id: int, body: ReviewVerdictUpdate
+) -> dict:
+    """更新单条复核结论（通过 / 需修订 / 重置为待处理）与备注。
+
+    队列已过期（文档或标注在生成后发生变化）时不阻止记录复核意见，但响应
+    中 stale=true，由前端提示「结果基于旧快照，建议重新生成抽样」。
+    """
+    with get_db() as conn:
+        doc = get_document_or_404(conn, document_id)
+        plan = _review_plan_row(conn, document_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="尚未生成抽样复核计划")
+        row = conn.execute(
+            "SELECT id FROM review_items WHERE id = ? AND plan_id = ?",
+            (item_id, plan["id"]),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="复核条目不存在")
+
+        if body.verdict is not None:
+            reviewed = "datetime('now')" if body.verdict != "pending" else "NULL"
+            conn.execute(
+                f'UPDATE review_items SET verdict = ?, reviewed_at = {reviewed}'
+                " WHERE id = ?",
+                (body.verdict, item_id),
+            )
+        if body.note is not None:
+            conn.execute(
+                "UPDATE review_items SET note = ? WHERE id = ?",
+                (body.note, item_id),
+            )
+        return _build_review_payload(conn, document_id, doc)

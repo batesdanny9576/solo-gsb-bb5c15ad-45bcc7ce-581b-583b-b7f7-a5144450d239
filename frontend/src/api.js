@@ -85,6 +85,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  // 标注抽样复核：获取队列 / 生成（重新生成）抽样计划 / 更新单条复核结论
+  getReview: (id) => request(`/documents/${id}/review`),
+  createReviewPlan: (id, samples) =>
+    request(`/documents/${id}/review`, {
+      method: 'PUT',
+      body: JSON.stringify({ samples }),
+    }),
+  updateReviewItem: (id, itemId, payload) =>
+    request(`/documents/${id}/review/items/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
   updateCoding: (id, payload) =>
     request(`/codings/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteCoding: (id) => request(`/codings/${id}`, { method: 'DELETE' }),

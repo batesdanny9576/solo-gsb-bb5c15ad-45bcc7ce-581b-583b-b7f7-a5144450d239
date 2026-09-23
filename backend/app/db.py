@@ -37,6 +37,39 @@ CREATE TABLE IF NOT EXISTS codings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_codings_doc ON codings(document_id);
+
+-- 标注抽样复核：每篇文档至多一个抽样计划（重新生成即覆盖）
+CREATE TABLE IF NOT EXISTS review_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,            -- 生成时的文档内容指纹（sha256:…）
+    coding_signature TEXT NOT NULL,       -- 生成时的标注集合快照指纹
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS review_plan_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL REFERENCES review_plans(id) ON DELETE CASCADE,
+    code_id INTEGER NOT NULL REFERENCES codes(id) ON DELETE CASCADE,
+    sample_size INTEGER NOT NULL CHECK (sample_size >= 1),
+    UNIQUE (plan_id, code_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL REFERENCES review_plans(id) ON DELETE CASCADE,
+    coding_id INTEGER REFERENCES codings(id) ON DELETE SET NULL,
+    code_id INTEGER REFERENCES codes(id) ON DELETE SET NULL,
+    verdict TEXT NOT NULL DEFAULT 'pending'
+            CHECK (verdict IN ('pending', 'approved', 'revision')),
+    note TEXT NOT NULL DEFAULT '',
+    reviewed_at TEXT,
+    -- 生成时快照：对应标注即使被删除 / 改区间，复核记录仍可展示与统计
+    snap_start INTEGER NOT NULL CHECK (snap_start >= 0),
+    snap_end INTEGER NOT NULL CHECK (snap_end > snap_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_items_plan ON review_items(plan_id);
 """
 
 PALETTE = [
